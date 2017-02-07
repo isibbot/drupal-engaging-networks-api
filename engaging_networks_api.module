@@ -1,0 +1,190 @@
+<?php
+/**
+ * Implements hook_help().
+ *
+ * Displays help and module information.
+ *
+ * @param path
+ *   Which path of the site we're using to display help
+ * @param arg
+ *   Array that holds the current path as returned from arg() function
+ */
+function engaging_networks_api_help($path, $arg) {
+  switch ($path) {
+    case "admin/help#engaging_networks_api":
+      return '' . t("Help and module information:") . '';
+      break;
+  }
+}
+
+/**
+ * @file
+ * A menu hook for settings.
+ */
+function engaging_networks_api_admin() {
+  $form = array();
+
+  $form['ens_auth_token'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Auth token'),
+    '#default_value' => variable_get('ens_auth_token', 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'),
+    //'#size' => 10,
+    //'#maxlength' => 10,
+    '#description' => t("Your the Engaging Newtwoks auth token."),
+    '#required' => TRUE,
+  );
+
+  return system_settings_form($form);
+}
+
+
+
+/**
+ * @file
+ * A menu hook for integrating Engaging Networks API and calling some JSON.
+ */
+function engaging_networks_api_menu() {
+  $items = array();
+
+  $items['admin/config/services/engaging_networks_api'] = array(
+    'title' => 'Engaging Networks API',
+    'description' => 'Setting for Engaging Networks API.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('engaging_networks_api_admin'),
+    'access arguments' => array('administer engaging networks api settings'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['ens/supporter/json/%'] = array(
+    'title'             => 'Engaging Networks API opt-in integration',
+    'access callback'   => true,
+    'page callback'     => 'engaging_networks_api_json',
+    'delivery callback' => 'drupal_json_output',
+    'page arguments' => array(2),
+  );
+  return $items;
+}
+
+/**
+* Do authorisation
+*
+* return: String token
+*/
+function _engaging_networks_api_get_auth_token(){
+  $ch = curl_init();
+  // Authenticate with Engaging Networks
+  $authUrl = 'https://www.e-activist.com/ens/service/authenticate';
+  $headers = array(
+    'Content-Type: application/json; charset=UTF-8',
+    'ens-auth-token: ' . variable_get('ens_auth_token'),
+  );
+  curl_setopt_array($ch, array(
+    CURLOPT_URL => $authUrl,
+    CURLOPT_HEADER => 0,
+    CURLOPT_HTTPHEADER => $headers,
+    CURLOPT_POST => 1,
+    CURLOPT_POSTFIELDS => variable_get('ens_auth_token'),
+    CURLOPT_RETURNTRANSFER => TRUE,
+  ));
+
+  $res = curl_exec($ch);
+  curl_close($ch);
+  if ($res) {
+    $json = json_decode($res, true);
+    if (isset($json['ens-auth-token'])){
+      return $json['ens-auth-token'];
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Get supporter data
+ */
+function _engaging_networks_api_get_supporter_data($auth_token, $email){
+  $suppUrl = 'https://www.e-activist.com/ens/service/supporter?includeQuestions=true&email=' . $email;
+
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_VERBOSE, true);
+  curl_setopt($ch, CURLOPT_HTTPGET, 1);
+  curl_setopt($ch, CURLOPT_URL, $suppUrl);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+    'ens-auth-token: ' . $auth_token
+  ));
+  $res = curl_exec($ch);
+  curl_close($ch);
+
+  if ($res) {
+    return json_decode($res, true);
+  }
+
+  return FALSE;
+}
+
+/**
+ * Process a question
+ */
+
+function _engaging_networks_api_process_question($question){
+  $response = $question['response'];
+  // simplify response
+  $question['response'] = ($response == 'Y') || ($response == 1);
+  return $question;
+}
+
+/**
+* @file
+* Page callback function to authenticate with Engaging Networks and do the API call.
+*/
+function engaging_networks_api_json($args) {
+  if (!is_string($args)){
+    return array();
+  }
+  //ini_set('display_errors', 'On');
+
+  $auth_token = _engaging_networks_api_get_auth_token();
+
+  if ($auth_token && $raw_supporter_data = _engaging_networks_api_get_supporter_data($auth_token, $args)){
+    //print_r($raw_supporter_data);
+
+    $data_to_return = array();
+    $data_to_return['supporter_email'] = $args;
+    $data_to_return['questions'] = array();
+    if (empty($raw_supporter_data['questions'])){
+      $data_to_return['new_supporter'] = true;
+    }
+    else {
+      $data_to_return['new_supporter'] = false;
+
+      $data_to_return['opted_out_of_all'] = TRUE;
+      $data_to_return['opted_in_to_all'] = TRUE;
+
+      foreach ($raw_supporter_data['questions'] as $raw_question) {
+        $processed_question = _tcs_en_api_process_question($raw_question);
+        if ($processed_question['type'] == 'OPTIN'){
+          $data_to_return['questions'][$processed_question['name']] = $processed_question;
+          if ($processed_question['response']) {
+            $data_to_return['opted_out_of_all'] = FALSE;
+          }
+          else {
+            $data_to_return['opted_in_to_all'] = FALSE;
+          }
+        }
+      }
+    }
+
+    return $data_to_return;
+  }
+
+  return array();
+}
+
+/**
+* @file
+* Initialisation function to add a JavaScript file for this module.
+*/
+function engaging_networks_api_init() {
+  drupal_add_js(drupal_get_path('module', 'engaging_networks_api') . '/js/en_api.js');
+}
